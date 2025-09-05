@@ -1,55 +1,85 @@
-import os
-import time
 import requests
-from bs4 import BeautifulSoup
+import time
+import os
+import re
+from datetime import datetime, timedelta
 from twilio.rest import Client
 from keep_alive import keep_alive
 
-# Twilio credentials (from Render Environment Variables)
-ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TO = os.getenv("WHATSAPP_TO")  # e.g. whatsapp:+91XXXXXXXXXX
-FROM = "whatsapp:+14155238886"  # Twilio Sandbox number
+URL = "https://scentoria.co.in/collections/all"  # page to monitor
+CHECK_KEYWORD = "partial"  # keyword to search for (case-insensitive)
+CHECK_INTERVAL = 300  # seconds between checks (5 minutes)
 
-client = Client(ACCOUNT_SID, AUTH_TOKEN)
-URL = "https://scentoria.co.in"
-
+# Store already seen product titles to avoid duplicate alerts
 seen_products = set()
 
-def send_whatsapp(message):
-    client.messages.create(
-        body=message,
-        from_=FROM,
-        to=TO
+# Track next time to send daily alive message
+next_alive_time = datetime.now() + timedelta(days=1)
+
+
+def send_whatsapp_message(body):
+    """Send a WhatsApp message using Twilio API"""
+    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    whatsapp_to = os.getenv("WHATSAPP_TO")  # e.g., whatsapp:+91XXXXXXXXXX
+    whatsapp_from = "whatsapp:+14155238886"  # Twilio Sandbox number
+
+    client = Client(account_sid, auth_token)
+    message = client.messages.create(
+        body=body,
+        from_=whatsapp_from,
+        to=whatsapp_to
     )
+    print("Message sent:", message.sid)
 
-def check_site():
-    global seen_products
+
+def check_products():
+    """Scrape the site and look for new products with keyword"""
     try:
-        r = requests.get(URL, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
+        response = requests.get(URL, timeout=10)
+        response.raise_for_status()
+        html = response.text.lower()
 
-        products = [p.get_text(strip=True) for p in soup.find_all("h2", class_="woo-loop-product__title")]
-        new_found = []
+        titles = re.findall(r'alt="([^"]+)"', html)
 
-        for product in products:
-            if "partial" in product.lower() and product not in seen_products:
-                new_found.append(product)
-                seen_products.add(product)
-
-        for p in new_found:
-            send_whatsapp(f"New Partial Product Found: {p}")
-            print(f"Sent WhatsApp: {p}")
+        for title in titles:
+            if CHECK_KEYWORD.lower() in title.lower() and title not in seen_products:
+                seen_products.add(title)
+                msg = f"🆕 New product found: {title}"
+                print(msg)
+                send_whatsapp_message(msg)
 
     except Exception as e:
-        print(f"Error: {e}")
+        print("Error during check:", e)
+
+
+def send_startup_test_message():
+    """Send a one-time test message when bot starts"""
+    send_whatsapp_message("✅ Test message from your Scentoria bot (startup check).")
+
+
+def send_daily_alive_message():
+    """Send daily 'I’m alive' status update"""
+    global next_alive_time
+    now = datetime.now()
+    if now >= next_alive_time:
+        send_whatsapp_message("🤖 Daily check-in: your Scentoria bot is alive and monitoring.")
+        next_alive_time = now + timedelta(days=1)
+
 
 def main():
-    keep_alive()  # start Flask keep-alive server
+    keep_alive()  # start keep-alive server
     print("Bot started. Monitoring for 'partial' products...")
+
+    # Send test WhatsApp message at startup
+    send_startup_test_message()
+
+    # Continuous monitoring
     while True:
-        check_site()
-        time.sleep(300)  # check every 5 minutes
+        check_products()
+        send_daily_alive_message()
+        time.sleep(CHECK_INTERVAL)
+
 
 if __name__ == "__main__":
     main()
